@@ -1,21 +1,35 @@
-﻿using Humanizer;
-using ManagedCommon;
-using System.Timers;
+﻿using System.Timers;
 using System.Windows.Input;
+using Humanizer;
+using ManagedCommon;
 using TimeSpanParserUtil;
 using Wox.Plugin;
 
 namespace Community.PowerToys.Run.Plugin.Timers;
+
 public class TimerResultService
 {
     private readonly List<TimerPlus> _timers = [];
     private readonly PluginInitContext _pluginContext;
+    private readonly SoundService _soundService;
+    private readonly Settings _settings;
+    private readonly ToastNotificationService _toastService;
     private string _iconPath = "Images/Timer.light.png";
 
-    public TimerResultService(PluginInitContext pluginContext)
+    public TimerResultService(
+        PluginInitContext pluginContext,
+        SoundService soundService,
+        Settings settings
+    )
     {
         ArgumentNullException.ThrowIfNull(pluginContext);
+        ArgumentNullException.ThrowIfNull(soundService);
+        ArgumentNullException.ThrowIfNull(settings);
+
         _pluginContext = pluginContext;
+        _soundService = soundService;
+        _settings = settings;
+        _toastService = new ToastNotificationService(soundService);
         _pluginContext.API.ThemeChanged += (_, theme) => UpdateTheme(theme);
         UpdateTheme(_pluginContext.API.GetCurrentTheme());
     }
@@ -45,6 +59,7 @@ public class TimerResultService
     private List<Result> GetRunningTimersResults(string search)
     {
         var timerResults = new List<Result>();
+
         for (var i = 0; i < _timers.Count; i++)
         {
             var timer = _timers[i];
@@ -52,16 +67,17 @@ public class TimerResultService
             var resultTitle = string.IsNullOrWhiteSpace(timer.Title)
                 ? $"{i + 1}: {Humanize(timerInterval).Singularize(false)} timer"
                 : $"{i + 1}: {timer.Title} ({Humanize(timerInterval).Singularize(false)} timer)";
-
-            timerResults.Add(new Result()
-            {
-                QueryTextDisplay = search,
-                Title = resultTitle,
-                SubTitle = $"{Humanize(timer.TimeLeft)} left",
-                IcoPath = _iconPath,
-                Action = _ => true,
-                ContextData = timer,
-            });
+            timerResults.Add(
+                new Result()
+                {
+                    QueryTextDisplay = search,
+                    Title = resultTitle,
+                    SubTitle = $"{Humanize(timer.TimeLeft)} left",
+                    IcoPath = _iconPath,
+                    Action = _ => true,
+                    ContextData = timer,
+                }
+            );
         }
 
         return timerResults;
@@ -71,13 +87,17 @@ public class TimerResultService
     {
         query = query.Trim();
 
-        if (!TimeSpanParser.TryParse(query, settings.TimeSpanParserOptions, out var timeSpan) || timeSpan <= TimeSpan.Zero)
+        if (
+            !TimeSpanParser.TryParse(query, settings.TimeSpanParserOptions, out var timeSpan)
+            || timeSpan <= TimeSpan.Zero
+        )
         {
             var parsingErrorResult = new Result()
             {
                 QueryTextDisplay = query,
                 Title = "Parsing error",
-                SubTitle = "Unable to parse the provided time. Try using one of the following formats: 30s, 15m or 1h or 2h30m",
+                SubTitle =
+                    "Unable to parse the provided time. Try using one of the following formats: 30s, 15m or 1h or 2h30m",
                 IcoPath = _iconPath,
                 Action = _ => true,
             };
@@ -100,7 +120,7 @@ public class TimerResultService
                 timer.Start();
                 _timers.Add(timer);
                 return true;
-            }
+            },
         };
 
         return [result];
@@ -112,13 +132,47 @@ public class TimerResultService
             timer.Dispose();
 
             _timers.Remove(timer);
-            if (string.IsNullOrWhiteSpace(timer.Title))
+
+            var notificationTitle = string.IsNullOrWhiteSpace(timer.Title)
+                ? $"{Humanize(timeSpan).Singularize(false)} timer elapsed"
+                : timer.Title;
+
+            var notificationMessage = string.IsNullOrWhiteSpace(timer.Title)
+                ? ""
+                : $"{Humanize(timeSpan).Singularize(false)} timer elapsed";
+
+            if (_settings.EnableAlarmSound)
             {
-                _pluginContext!.API.ShowNotification($"{Humanize(timeSpan).Singularize(false)} timer elapsed.");
+                _toastService.ShowTimerNotification(
+                    notificationTitle,
+                    notificationMessage,
+                    onDismiss: () =>
+                    {
+                        _soundService.StopAlarm();
+                    }
+                );
+
+                _soundService.PlayAlarm(
+                    string.IsNullOrEmpty(_settings.CustomSoundPath) ? "default.wav" : _settings.CustomSoundPath,
+                    _settings.AlarmDurationSeconds
+                );
+
+                Task.Delay(TimeSpan.FromSeconds(_settings.AlarmDurationSeconds))
+                    .ContinueWith(_ =>
+                    {
+                        _soundService.StopAlarm();
+                    });
             }
             else
             {
-                _pluginContext!.API.ShowNotification(timer.Title, $"{Humanize(timeSpan).Singularize(false)} timer elapsed.");
+                if (string.IsNullOrWhiteSpace(timer.Title))
+                {
+                    _pluginContext!.API.ShowNotification(notificationTitle);
+                }
+                else
+                {
+                    _pluginContext!.API.ShowNotification(notificationTitle, notificationMessage);
+                }
             }
         }
     }
@@ -126,7 +180,8 @@ public class TimerResultService
     public List<ContextMenuResult> GetContextMenuResults(Result selectedResult)
     {
         var timer = selectedResult.ContextData as TimerPlus;
-        if (timer is null) return [];
+        if (timer is null)
+            return [];
 
         var deleteTimer = new ContextMenuResult()
         {
@@ -164,6 +219,6 @@ public class TimerResultService
         return string.Empty;
     }
 
-    private static string Humanize(TimeSpan ts)
-        => ts.Humanize(precision: 3, minUnit: Humanizer.Localisation.TimeUnit.Second);
+    private static string Humanize(TimeSpan ts) =>
+        ts.Humanize(precision: 3, minUnit: Humanizer.Localisation.TimeUnit.Second);
 }
